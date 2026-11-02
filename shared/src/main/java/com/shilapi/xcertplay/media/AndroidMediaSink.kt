@@ -228,6 +228,7 @@ class AndroidMediaSink(
     @Volatile private var screenStreamActiveChanged = onScreenStreamActiveChanged
     private val surfaces = ConcurrentHashMap<Int, Surface>()
     private val videoDecoders = ConcurrentHashMap<Int, VideoDecoder>()
+    private val mainSurfaceFrameWaiter = MainSurfaceFrameWaiter()
     // Surface capture, worker publication, retirement and detach snapshots share one ownership boundary.
     // Native codec work and waits never run under this lock.
     private val videoOwnershipLock = Any()
@@ -278,6 +279,15 @@ class AndroidMediaSink(
         } catch (_: java.util.concurrent.RejectedExecutionException) { recoveryPending.set(false) }
     }
 
+    /** Wait for this output's next submitted main frame; delay includes any scheduled video pacing. */
+    fun awaitMainSurfaceFrame(surface: Surface, onFrameSubmitted: (delayMillis: Long) -> Unit) {
+        mainSurfaceFrameWaiter.await(surface, onFrameSubmitted)
+    }
+
+    fun cancelMainSurfaceFrameWait() {
+        mainSurfaceFrameWaiter.cancel()
+    }
+
     fun setSurface(type: Int, surface: Surface) {
         synchronized(videoOwnershipLock) {
             if (videoClosed) return
@@ -288,7 +298,10 @@ class AndroidMediaSink(
 
     fun clearSurface(type: Int, surface: Surface) {
         synchronized(videoOwnershipLock) {
-            if (surfaces.remove(type, surface)) videoDecoders[type]?.setSurface(null)
+            if (surfaces.remove(type, surface)) {
+                if (type == MAIN_SCREEN_TYPE) mainSurfaceFrameWaiter.cancel(surface)
+                videoDecoders[type]?.setSurface(null)
+            }
         }
     }
 
@@ -305,6 +318,7 @@ class AndroidMediaSink(
         val requests = ArrayList<SurfaceDetachRequest>()
         val steps = ArrayList<() -> Boolean>()
         synchronized(videoOwnershipLock) {
+            mainSurfaceFrameWaiter.cancel(surface)
             surfaces.entries.removeIf { it.value === surface } // future workers must not start on it
             if (defaultSurface === surface) defaultSurface = null
             for ((type, decoder) in videoDecoders.entries.toList()) {
@@ -400,7 +414,7 @@ class AndroidMediaSink(
             if (videoClosed) return
             val id = type to key
             synchronized(mirrorLock) {
-                mirrorDecoders.remove(id)?.close()
+                mirrorDecoders.remove(id)?.let(::closeMirrorDecoder)
                 if (surface == null) {
                     mirrorSurfaces.remove(id)
                     return
@@ -409,6 +423,30 @@ class AndroidMediaSink(
             }
             lastVideoConfig[type]?.let { (codec, data) -> mirrorDecoders(type).forEach { it.configure(codec, data) } }
         }
+    }
+
+    /** A SurfaceHolder must not disappear while its mirror decoder still owns the buffer queue. */
+    fun detachMirrorSurface(type: Int, key: String, surface: Surface): Boolean {
+        val decoders = synchronized(videoOwnershipLock) {
+            synchronized(mirrorLock) {
+                val id = type to key
+                if (mirrorSurfaces[id] === surface) {
+                    mirrorSurfaces.remove(id)
+                    mirrorDecoders.remove(id)?.let(::closeMirrorDecoder)
+                }
+                // Stream shutdown may already have retired the mirror before its holder disappears.
+                closingVideoDecoders.toList()
+            }
+        }
+        val deadline = System.nanoTime() + detachTimeoutNanos + detachGraceNanos
+        return decoders.map { it.awaitExitUntil(deadline) }.all { it }
+    }
+
+    /** Caller holds videoOwnershipLock; publish before close so a fast worker exit removes it. */
+    private fun closeMirrorDecoder(decoder: VideoDecoder) {
+        if (decoder.exited) return
+        closingVideoDecoders += decoder
+        decoder.close()
     }
 
     private fun mirrorDecoders(type: Int): List<VideoDecoder> = synchronized(videoOwnershipLock) {
@@ -468,7 +506,7 @@ class AndroidMediaSink(
                 videoDiagnosticHandlers.remove(type)
                 videoDecoders[type]?.let { retire(type, it) }
                 synchronized(mirrorLock) {
-                    mirrorDecoders.keys.filter { it.first == type }.forEach { mirrorDecoders.remove(it)?.close() }
+                    mirrorDecoders.keys.filter { it.first == type }.forEach { mirrorDecoders.remove(it)?.let(::closeMirrorDecoder) }
                 }
                 lastVideoConfig.remove(type)
                 pendingVideoCodec.remove(type)
@@ -565,7 +603,7 @@ class AndroidMediaSink(
             videoClosed = true
             videoDecoders.entries.toList().forEach { (type, decoder) -> retire(type, decoder) }
             synchronized(mirrorLock) {
-                mirrorDecoders.values.forEach(VideoDecoder::close)
+                mirrorDecoders.values.forEach(::closeMirrorDecoder)
                 mirrorDecoders.clear()
                 mirrorSurfaces.clear()
             }
@@ -575,6 +613,7 @@ class AndroidMediaSink(
             activeScreenTypes.clear()
             screenStreamActiveChanged = null
         }
+        mainSurfaceFrameWaiter.close()
         videoRecoveryHandlers.clear()
         videoDiagnosticHandlers.clear()
         recoveryExecutor.shutdownNow()
@@ -614,6 +653,9 @@ class AndroidMediaSink(
         report = { videoDiagnosticHandlers[type]?.invoke(it) },
         statsLabel = statsLabel,
         onExit = ::onVideoDecoderExit,
+        onFrameSubmitted = { output, delayMillis ->
+            if (type == MAIN_SCREEN_TYPE && statsLabel == null) mainSurfaceFrameWaiter.onFrameSubmitted(output, delayMillis)
+        },
         // Only the main screen goes to the host's SurfaceView; mirrors and the cluster keep their path.
         pacingDelayNanos = if (type == MAIN_SCREEN_TYPE && statsLabel == null) videoPacingDelayMillis * 1_000_000L else 0L,
     ).also { if (startImmediately) it.start() }
@@ -711,6 +753,7 @@ private class VideoDecoder(
     pacingDelayNanos: Long = 0L,
     /** Called on the worker as its last step, after it has released its codec. */
     private val onExit: (VideoDecoder) -> Unit = {},
+    private val onFrameSubmitted: (Surface, Long) -> Unit = { _, _ -> },
 ) : Closeable {
     private val pacer = FramePacer()
     private val pacingDelay = if (pacingDelayNanos > 0) PacingDelay(pacingDelayNanos) else null
@@ -1144,13 +1187,18 @@ private class VideoDecoder(
                         stats.onPacingDelay(delay.nanos)
                         localNs + delay.nanos
                     } else 0L
-                    if (Build.VERSION.SDK_INT >= 21 && targetNs - now in 1..MAX_PACING_AHEAD_NS) {
+                    val scheduled = Build.VERSION.SDK_INT >= 21 && targetNs - now in 1..MAX_PACING_AHEAD_NS
+                    if (scheduled) {
                         codec.releaseOutputBuffer(index, targetNs)
                     } else {
                         if (shown && delay != null && !heldOverGap && !pauseHeld) stats.onLate()
                         codec.releaseOutputBuffer(index, render)
                     }
-                    if (shown) stats.onRendered()
+                    if (shown) {
+                        stats.onRendered()
+                        val delayMillis = if (scheduled) ((targetNs - System.nanoTime()).coerceAtLeast(0L) + 999_999L) / 1_000_000L else 0L
+                        outputSurface?.let { onFrameSubmitted(it, delayMillis) }
+                    }
                     if (shown && !renderedFrameLogged) {
                         renderedFrameLogged = true
                         report("first frame rendered")

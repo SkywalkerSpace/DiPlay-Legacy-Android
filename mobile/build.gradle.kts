@@ -18,7 +18,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.shihab.diplay"
+        applicationId = "com.shihab.diplay.duo"
         minSdk = 19
         targetSdk = 37
         multiDexEnabled = true
@@ -45,10 +45,6 @@ android {
     }
 
     buildTypes {
-        debug {
-            applicationIdSuffix = ".hudtest"
-            versionNameSuffix = "-hud-test"
-        }
         release {
             optimization {
                 enable = false

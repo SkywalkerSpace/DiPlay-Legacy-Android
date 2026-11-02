@@ -41,7 +41,7 @@ class DiPlaySessionService : Service() {
         }
         builder
             .setSmallIcon(if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) R.drawable.ic_diplay_notification else R.drawable.ic_carplay)
-            .setContentTitle("DiPlay")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText("CarPlay connection running")
             .setContentIntent(open).setOngoing(true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -73,7 +73,7 @@ class DiPlaySessionService : Service() {
         stopSelf()
     }
     companion object {
-        const val ACTION_STOP = "com.shihab.diplay.DISCONNECT"
+        const val ACTION_STOP = "com.shihab.diplay.duo.DISCONNECT"
         private const val CHANNEL = "diplay_connection"
     }
 }

@@ -430,6 +430,30 @@ class AndroidMediaSinkCodecDetachTest {
         }
     }
 
+    @Test fun resumedMainOutputNotifiesAgainWithoutASecondSessionFirstFrame() {
+        val surface = newSurface()
+        val sink = configuredSink(surface)
+        val decoder = mainDecoder(sink)
+        val before = mediaCodecOf(decoder)
+        val first = CountDownLatch(1)
+        sink.awaitMainSurfaceFrame(surface) { first.countDown() }
+        repeat(3) { sink.onVideoFrame(110, idr) }
+        assertTrue("A new main output submission completes the wait", first.await(5, TimeUnit.SECONDS))
+        assertTrue(decoder.field<Boolean>("renderedFrameLogged"))
+
+        assertTrue(sink.beginSurfaceDetach(surface, parkMain = true).await())
+        val resumed = CountDownLatch(1)
+        sink.awaitMainSurfaceFrame(surface) { resumed.countDown() }
+        repeat(3) { sink.onVideoFrame(110, idr) }
+        assertTrue(barrier(sink))
+        assertEquals("Offscreen parking frames must not finish the visible wait", 1L, resumed.count)
+        sink.setSurface(110, surface)
+        repeat(3) { sink.onVideoFrame(110, idr) }
+        assertTrue("The same session and surface can report a fresh picture", resumed.await(5, TimeUnit.SECONDS))
+        assertSame(before, mediaCodecOf(decoder))
+        assertTrue("The original session first-frame latch is not reset", decoder.field<Boolean>("renderedFrameLogged"))
+    }
+
     // --- helpers ---
 
     private fun newSurface() = Surface(SurfaceTexture(0))

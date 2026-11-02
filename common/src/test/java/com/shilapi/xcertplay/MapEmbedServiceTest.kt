@@ -38,6 +38,10 @@ class MapEmbedSurfaceControlHostShadow {
 @Config(sdk = [33], shadows = [MapEmbedSurfaceControlHostShadow::class])
 @LooperMode(LooperMode.Mode.PAUSED)
 class MapEmbedServiceTest {
+    @Test fun mapActionIsIsolatedFromTheOriginalApp() {
+        assertEquals("com.shihab.diplay.duo.action.EMBED_MAP", MapEmbedService.ACTION)
+    }
+
     @Test fun disablingSharingReleasesAlreadyAttachedMaps() {
         MapEmbedSurfaceControlHostShadow.releases = 0
         MapMirrors.streamAspect = MapMirrors.PHYSICAL_STREAM_ASPECT

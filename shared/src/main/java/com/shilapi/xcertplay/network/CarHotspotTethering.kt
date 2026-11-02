@@ -2,6 +2,8 @@ package com.shilapi.xcertplay.network
 
 import android.content.Context
 import android.net.ConnectivityManager
+import android.net.wifi.WifiConfiguration
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.ResultReceiver
@@ -40,20 +42,27 @@ object CarHotspotTethering {
         val observedAdbState = AtomicReference<Boolean?>()
         val startReflection: (ResultReceiver) -> Unit = { receiver ->
             if (Build.VERSION.SDK_INT >= 37) throw NoSuchMethodException("Hidden tethering service is unavailable on API 37+")
-            val conn = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                context.getSystemService(ConnectivityManager::class.java)
-            } else {
+            if (Build.VERSION.SDK_INT < 26) {
+                val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    ?: throw NoSuchMethodException("Wi-Fi service unavailable")
+                // Android 4.4–7.x predates startTethering. Null preserves the car's saved SSID/password.
+                val setter = WifiManager::class.java.getMethod("setWifiApEnabled",
+                    WifiConfiguration::class.java, Boolean::class.javaPrimitiveType)
                 @Suppress("DEPRECATION")
-                context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                if (wifi.isWifiEnabled) wifi.setWifiEnabled(false)
+                val accepted = setter.invoke(wifi, null, true) == true
+                receiver.send(if (accepted) 0 else 1, null)
+            } else {
+                val conn = context.getSystemService(ConnectivityManager::class.java)
+                val service = ConnectivityManager::class.java.getDeclaredField("mService")
+                    .apply { isAccessible = true }
+                    .get(conn)
+                    ?: throw NoSuchMethodException("Connectivity service unavailable")
+                service.javaClass.getMethod(
+                    "startTethering", Int::class.javaPrimitiveType, ResultReceiver::class.java,
+                    Boolean::class.javaPrimitiveType, String::class.java,
+                ).invoke(service, 0, receiver, false, context.packageName)
             }
-            val service = ConnectivityManager::class.java.getDeclaredField("mService")
-                .apply { isAccessible = true }
-                .get(conn)
-                ?: throw NoSuchMethodException("Connectivity service unavailable")
-            service.javaClass.getMethod(
-                "startTethering", Int::class.javaPrimitiveType, ResultReceiver::class.java,
-                Boolean::class.javaPrimitiveType, String::class.java,
-            ).invoke(service, 0, receiver, false, context.packageName)
         }
         val startAdb: () -> Boolean = {
             val client = AtomicReference<LocalAdb?>()
