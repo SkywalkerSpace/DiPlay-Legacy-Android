@@ -3,7 +3,6 @@ package com.shilapi.xcertplay.network
 import android.content.Context
 import android.net.ConnectivityManager
 import android.os.Build
-import android.os.SystemClock
 import com.shilapi.xcertplay.compat.isReflectionFailure
 import com.shilapi.xcertplay.compat.realSdkInt
 import android.os.Bundle
@@ -39,10 +38,13 @@ object CarHotspotTethering {
         timeoutMillis: Long = WirelessStartupPolicy.HOTSPOT_READY_MILLIS,
         log: (String) -> Unit,
     ): Result {
-        disableWifiBeforeHotspot(context, log)
         val deadline = System.nanoTime() + timeoutMillis * 1_000_000L
         val observedAdbState = AtomicReference<Boolean?>()
-        val startReflection: (ResultReceiver) -> Unit = { receiver ->
+        val startReflection: (ResultReceiver) -> Unit = start@{ receiver ->
+            if (realSdkInt() < Build.VERSION_CODES.O) {
+                startWifiApFallback(context, receiver)
+                return@start
+            }
             if (realSdkInt() >= 37) throw NoSuchMethodException("Hidden tethering service is unavailable on API 37+")
             val conn = if (realSdkInt() >= Build.VERSION_CODES.M) {
                 context.getSystemService(ConnectivityManager::class.java)
@@ -92,6 +94,7 @@ object CarHotspotTethering {
             stateWithAdbObservation({ CarHotspotStatus.isEnabled(context) }, observedAdbState),
             startFallback = startAdb,
             start = startReflection,
+            beforeStart = { disableWifiBeforeHotspot(context, deadline, isCancelled, log) },
         ).also { log("car hotspot auto-enable: ${it.diagnostic}") }
     }
 
@@ -126,7 +129,14 @@ object CarHotspotTethering {
      * just falls through to the normal AP startup, so units without the conflict
      * behave exactly as before.
      */
-    private fun disableWifiBeforeHotspot(context: Context, log: (String) -> Unit) {
+    private fun disableWifiBeforeHotspot(
+        context: Context,
+        deadline: Long,
+        isCancelled: () -> Boolean,
+        log: (String) -> Unit,
+    ) {
+        fun stopped(): Boolean = isCancelled() || Thread.currentThread().isInterrupted || System.nanoTime() >= deadline
+        if (stopped()) return
         val wifi = if (realSdkInt() >= Build.VERSION_CODES.M) {
             context.getSystemService(android.net.wifi.WifiManager::class.java)
         } else {
@@ -134,7 +144,9 @@ object CarHotspotTethering {
             context.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
         } ?: return
         repeat(2) { attempt ->
+            if (stopped()) return
             val enabled = runCatching { wifi.isWifiEnabled }.getOrNull() ?: return
+            if (stopped()) return
             if (!enabled) {
                 log("car hotspot: wifi already off before AP start")
                 return
@@ -143,16 +155,21 @@ object CarHotspotTethering {
                 log("car hotspot: could not turn wifi off (attempt ${attempt + 1})")
                 return
             }
-            val waitUntil = SystemClock.elapsedRealtime() + 1_000L
-            while (runCatching { wifi.isWifiEnabled }.getOrDefault(true) &&
-                SystemClock.elapsedRealtime() < waitUntil) {
+            val waitUntil = minOf(deadline, System.nanoTime() + 1_000_000_000L)
+            while (true) {
+                if (stopped()) return
+                val stillEnabled = runCatching { wifi.isWifiEnabled }.getOrDefault(true)
+                if (stopped()) return
+                val remaining = waitUntil - System.nanoTime()
+                if (!stillEnabled || remaining <= 0) break
                 try {
-                    Thread.sleep(100L)
+                    TimeUnit.NANOSECONDS.sleep(minOf(100_000_000L, remaining))
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                     return
                 }
             }
+            if (stopped()) return
             if (runCatching { wifi.isWifiEnabled }.getOrDefault(true)) {
                 log("car hotspot: wifi still on after turn-off (attempt ${attempt + 1})")
             }
@@ -191,6 +208,7 @@ object CarHotspotTethering {
         isEnabled: () -> Boolean?,
         startFallback: (() -> Boolean)?,
         start: (ResultReceiver) -> Unit,
+        beforeStart: (() -> Unit)? = null,
     ): Result {
         fun stopped(): Result? = when {
             isCancelled() || Thread.currentThread().isInterrupted -> Result.CANCELLED
@@ -216,6 +234,8 @@ object CarHotspotTethering {
             val permission = canWrite()
             stopped()?.let { return it }
             if (!permission) return Result.PERMISSION_REQUIRED
+            beforeStart?.invoke()
+            stopped()?.let { return it }
             fun fallback(): Boolean {
                 stopped()?.let { return false }
                 return try { startFallback?.invoke() == true } catch (error: Exception) {

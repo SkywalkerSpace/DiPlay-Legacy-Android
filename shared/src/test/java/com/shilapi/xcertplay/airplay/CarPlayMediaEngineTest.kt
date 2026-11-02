@@ -7,7 +7,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [29], manifest = Config.NONE)
 class CarPlayMediaEngineTest {
     @Test
     fun streamConnectionIdUsesUnsignedDecimalForHkdfSalt() {
@@ -84,7 +89,35 @@ class CarPlayMediaEngineTest {
         }
     }
 
-    private fun testSession(videoInCar: Boolean = false): AirPlaySession = AirPlaySession(
+    @Test fun onlyMainScreenDiagnosticSignalsTheSessionFirstPicture() {
+        val diagnostics = mutableMapOf<Int, (String) -> Unit>()
+        val sink = object : MediaSink {
+            override fun setVideoDiagnosticHandler(type: Int, handler: (String) -> Unit) {
+                diagnostics[type] = handler
+            }
+        }
+        var pictures = 0
+        val session = testSession(listener = object : AirPlaySessionListener {
+            override fun onVideoFrameRendered(session: AirPlaySession) { pictures++ }
+        })
+        val engine = CarPlayMediaEngine(sink)
+        try {
+            PairVerify::class.java.getDeclaredField("sharedSecret").apply { isAccessible = true }
+                .set(session.pairVerify, ByteArray(32))
+            assertTrue(engine.onScreen(session, 111, mapOf("streamConnectionID" to 1L)) != null)
+            assertTrue(engine.onScreen(session, 110, mapOf("streamConnectionID" to 2L)) != null)
+            diagnostics.getValue(111)("first frame rendered")
+            diagnostics.getValue(110)("output format")
+            assertEquals(0, pictures)
+            diagnostics.getValue(110)("first frame rendered")
+            assertEquals(1, pictures)
+        } finally {
+            engine.onSessionClosed(session)
+            session.close()
+        }
+    }
+
+    private fun testSession(videoInCar: Boolean = false, listener: AirPlaySessionListener = object : AirPlaySessionListener {}): AirPlaySession = AirPlaySession(
         socket = Socket(),
         config = AirPlayConfig(
             deviceName = "test",
@@ -97,7 +130,7 @@ class CarPlayMediaEngineTest {
         identity = AirPlayIdentity.generate(),
         pairings = PairingStore(),
         mfi = null,
-        listener = object : AirPlaySessionListener {},
+        listener = listener,
         media = object : AirPlayMediaHandler {},
     )
 }

@@ -269,7 +269,7 @@ class MapEmbedService : Service() {
         private const val RELEASE_DELAY_MILLIS = 1_000L
 
         /** Bind to DiPlay's service with this action (the package differs between builds). */
-        const val ACTION = "com.shihab.diplay.action.EMBED_MAP"
+        const val ACTION = "com.shihab.diplay.duo.action.EMBED_MAP"
 
         // Launcher -> DiPlay. Every message needs replyTo.
         const val MSG_ATTACH = 1 // KEY_HOST_TOKEN, KEY_DISPLAY_ID, KEY_WIDTH, KEY_HEIGHT

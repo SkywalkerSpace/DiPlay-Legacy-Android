@@ -323,6 +323,8 @@ class SmoothVideoHostLifecycleTest {
     }
 
     private fun allowStartup(target: CarPlayHostActivity = activity) {
+        // buildActivity().get() skips onCreate and its Gaode startup callback.
+        setField(target, "startupAutomationReady", true)
         setField(target, "airPlayIdentity", AirPlayIdentity.generate())
         setField(target, "mfiTarget", MfiTarget.LOCAL)
         setField(target, "vpnReady", true)

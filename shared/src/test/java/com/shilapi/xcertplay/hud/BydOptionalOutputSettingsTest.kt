@@ -30,9 +30,6 @@ class BydOptionalOutputSettingsTest {
 
     @Test fun installedStockReceiverDoesNotEnableUnverifiedDilink4Hud() {
         val app = RuntimeEnvironment.getApplication()
-        val knownApp = object : ContextWrapper(app) {
-            override fun getPackageName(): String = "com.shihab.diplay"
-        }
         ShadowBuild.setFingerprint("BYD/DiLink4:10/unverified")
         val info = PackageInfo().apply {
             packageName = "com.byd.clusterdebug"
@@ -42,8 +39,34 @@ class BydOptionalOutputSettingsTest {
             }
         }
         shadowOf(app.packageManager).installPackage(info)
-        assertFalse(BydStandaloneHudOutput.available(knownApp))
-        assertTrue(BydStandaloneHudOutput.diagnostics(knownApp).contains("standaloneHudAvailable=false"))
+        for (pkg in listOf("com.shihab.diplay", "com.shihab.diplay.duo")) {
+            val knownApp = object : ContextWrapper(app) {
+                override fun getPackageName(): String = pkg
+            }
+            assertFalse(BydStandaloneHudOutput.available(knownApp))
+            assertTrue(BydStandaloneHudOutput.diagnostics(knownApp).contains("standaloneHudAvailable=false"))
+        }
+    }
+
+    @Test fun starterBridgeAllowsDuoAndExistingTestPackagesButStillValidatesTokens() {
+        val app = RuntimeEnvironment.getApplication()
+        for (pkg in listOf(
+            "com.andrerinas.headunitrevived.bydhudtest",
+            "com.shihab.diplay.hudtest",
+            "com.shihab.diplay.duo",
+        )) {
+            val context = object : ContextWrapper(app) {
+                override fun getPackageName(): String = pkg
+            }
+            // Invalid credentials fail before initialization, so no bridge worker is started.
+            val error = runCatching { BydStarterBridge.configure(context, "invalid") }.exceptionOrNull()
+            assertTrue("$pkg must pass the package guard", error is IllegalArgumentException)
+        }
+        val unrelatedApp = object : ContextWrapper(app) {
+            override fun getPackageName(): String = "com.example.unrelated"
+        }
+        val error = runCatching { BydStarterBridge.configure(unrelatedApp, "invalid") }.exceptionOrNull()
+        assertTrue("Unlisted packages must remain rejected", error is IllegalStateException)
     }
 
 }

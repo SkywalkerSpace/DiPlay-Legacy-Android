@@ -4,7 +4,7 @@
     <!-- Lets the sample find DiPlay's map service on Android 11+. -->
     <queries>
         <intent>
-            <action android:name="com.shihab.diplay.action.EMBED_MAP" />
+            <action android:name="com.shihab.diplay.duo.action.EMBED_MAP" />
         </intent>
     </queries>
 

@@ -440,6 +440,71 @@ class AndroidMediaSinkCodecDetachTest {
         }
     }
 
+    @Test fun resumedMainOutputNotifiesAgainWithoutASecondSessionFirstFrame() {
+        val surface = newSurface()
+        val sink = configuredSink(surface)
+        val decoder = mainDecoder(sink)
+        val before = mediaCodecOf(decoder)
+        val first = CountDownLatch(1)
+        sink.awaitMainSurfaceFrame(surface) { first.countDown() }
+        repeat(3) { sink.onVideoFrame(110, idr) }
+        assertTrue(first.await(5, TimeUnit.SECONDS))
+        assertTrue(barrier(sink))
+        assertTrue(decoder.field<Boolean>("renderedFrameLogged"))
+
+        assertTrue(sink.beginSurfaceDetach(surface, parkMain = true).await())
+        val resumed = CountDownLatch(1)
+        sink.awaitMainSurfaceFrame(surface) { resumed.countDown() }
+        repeat(3) { sink.onVideoFrame(110, idr) }
+        assertTrue(barrier(sink))
+        assertEquals("Parking is not a visible output", 1L, resumed.count)
+        sink.setSurface(110, surface)
+        // Surface handoff discards queued frames; submit only after the worker applies it.
+        assertTrue(barrier(sink))
+        repeat(3) { sink.onVideoFrame(110, idr) }
+        assertTrue(resumed.await(5, TimeUnit.SECONDS))
+        assertTrue(barrier(sink))
+        assertSame(before, mediaCodecOf(decoder))
+        assertTrue("Session first-frame history survives parking", decoder.field<Boolean>("renderedFrameLogged"))
+    }
+
+    @Test fun staleMirrorDetachDoesNotRemoveTheReplacementOutput() {
+        val sink = AndroidMediaSink().also(sinks::add)
+        val old = newSurface()
+        val next = newSurface()
+        sink.setMirrorSurface(110, "second", old)
+        sink.setMirrorSurface(110, "second", next)
+        assertTrue(sink.detachMirrorSurface(110, "second", old))
+        assertSame(next, sink.field<Map<Pair<Int, String>, Surface>>("mirrorSurfaces")[110 to "second"])
+        assertTrue(sink.detachMirrorSurface(110, "second", next))
+        assertTrue(sink.field<Map<Pair<Int, String>, Surface>>("mirrorSurfaces").isEmpty())
+    }
+
+    @Test fun mirrorRetiredByStreamShutdownRemainsTrackedUntilItsCodecExits() {
+        val main = newSurface()
+        val mirror = newSurface()
+        val sink = configuredSink(main)
+        sink.setMirrorSurface(110, "second", mirror)
+        val decoder = sink.field<Map<Pair<Int, String>, Any>>("mirrorDecoders").getValue(110 to "second")
+        codec.blockNext()
+        decoder.javaClass.getDeclaredMethod("submit", ByteArray::class.java,
+            Long::class.javaPrimitiveType, Long::class.javaPrimitiveType).apply { isAccessible = true }
+            .invoke(decoder, idr, 0L, 0L)
+        assertTrue(codec.entered.await(5, TimeUnit.SECONDS))
+        sink.onScreenStreamActive(110, false)
+        sink.detachTimeoutNanos = 100_000_000L
+        sink.detachGraceNanos = 100_000_000L
+        assertFalse("Destroy cannot confirm while mirror owns its codec", sink.detachMirrorSurface(110, "second", mirror))
+        sink.close()
+        val released = CountDownLatch(1)
+        sink.whenVideoReleased { released.countDown() }
+        assertEquals(1L, released.count)
+        codec.release()
+        assertTrue(sink.awaitVideoReleased(5_000))
+        assertTrue(released.await(5, TimeUnit.SECONDS))
+        assertTrue(sink.detachMirrorSurface(110, "second", mirror))
+    }
+
     // --- helpers ---
 
     private fun newSurface(): Surface {

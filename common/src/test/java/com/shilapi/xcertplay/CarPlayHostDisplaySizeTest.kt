@@ -353,6 +353,46 @@ class CarPlayHostDisplaySizeTest {
         assertEquals(1, getField("restartGeneration"))
     }
 
+    @Test @Config(sdk = [30]) fun teardownWaitsForStartupAutomationBeforeUsingTheLatestSize() {
+        allowStartup()
+        setField("startupAutomationReady", false)
+        startSession(windowWidth = 2250, windowHeight = 1080)
+        applySize(1080, 2250)
+        applySize(2250, 1080)
+
+        finishTeardown()
+
+        assertNull(getField("controller"))
+        assertNull(getField("sessionDisplay"))
+        assertFalse(getField("handshakeResetInProgress") as Boolean)
+
+        setField("startupAutomationReady", true)
+        invoke("maybeStartCarPlay")
+
+        assertSessionSize(2250, 1080)
+        assertEquals(1, getField("restartGeneration"))
+    }
+
+    @Test @Config(sdk = [30]) fun warmupCompletionWaitsForForegroundStartupContinuation() {
+        allowStartup()
+        startSession(windowWidth = 2250, windowHeight = 1080)
+        val automation = CarPlayStartup(activity, {}, {}, {})
+        setField("startupAutomation", automation)
+        try {
+            setField("startupPrerequisitesRequested", false)
+            applySize(1080, 2250)
+            finishTeardown()
+            assertNull(getField("controller"))
+            assertNull(getField("sessionDisplay"))
+
+            setField("startupPrerequisitesRequested", true)
+            invoke("maybeStartCarPlay")
+            assertSessionSize(1080, 2250)
+        } finally {
+            automation.close()
+        }
+    }
+
     @Test @Config(sdk = [30]) fun teardownRechecksStartupPrerequisites() {
         allowStartup()
         startSession()
@@ -479,6 +519,8 @@ class CarPlayHostDisplaySizeTest {
     }
 
     private fun allowStartup() {
+        // buildActivity().get() skips onCreate and its Gaode startup callback.
+        setField("startupAutomationReady", true)
         setField("airPlayIdentity", AirPlayIdentity.generate())
         setField("mfiTarget", MfiTarget.LOCAL)
         setField("vpnReady", true)

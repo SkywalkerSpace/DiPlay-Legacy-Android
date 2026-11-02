@@ -29,6 +29,8 @@
     <!-- The centre card also follows whichever launcher is the default home. -->
     <queries>
         <package android:name="com.byd.carsettings" />
+        <package android:name="com.autonavi.amapauto" />
+        <package android:name="com.autonavi.minimap" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.HOME" />
@@ -172,7 +174,7 @@
             android:exported="true"
             tools:ignore="ExportedService">
             <intent-filter>
-                <action android:name="com.shihab.diplay.action.EMBED_MAP" />
+                <action android:name="com.shihab.diplay.duo.action.EMBED_MAP" />
             </intent-filter>
         </service>
 
